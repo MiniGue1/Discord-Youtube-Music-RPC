@@ -11,8 +11,9 @@ let page = null;
 async function setupBrowser() {
     console.log('Setting up browser...');
     browser = await puppeteer.launch({ 
-        headless: "new",
-        args: ['--no-sandbox', '--disable-web-security']
+        headless: false, // Make browser visible
+        args: ['--no-sandbox', '--disable-web-security'],
+        defaultViewport: null
     });
     page = await browser.newPage();
     console.log('Navigating to YouTube Music...');
@@ -21,10 +22,12 @@ async function setupBrowser() {
     // Wait for user to log in if needed
     try {
         await page.waitForSelector('.title.style-scope.ytmusic-player-bar', { timeout: 30000 });
+        console.log('Music player detected!');
     } catch (error) {
-        console.log('Please log in to YouTube Music in the browser window');
-        // Keep the browser visible for login
-        await page.waitForSelector('.title.style-scope.ytmusic-player-bar', { timeout: 300000 });
+        console.log('Please log in to YouTube Music in the browser window and start playing a song');
+        // Keep waiting for the player to appear
+        await page.waitForSelector('.title.style-scope.ytmusic-player-bar', { timeout: 0 });
+        console.log('Music player detected after login!');
     }
     console.log('Browser setup complete');
 }
