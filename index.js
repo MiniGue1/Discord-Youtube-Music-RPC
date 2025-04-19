@@ -1,57 +1,91 @@
 const DiscordRPC = require('discord-rpc');
 const puppeteer = require('puppeteer');
 
-const clientId = '1363153003560964417'; // Replace with your Discord application client ID
+const clientId = '1363153003560964417';
 const rpc = new DiscordRPC.Client({ transport: 'ipc' });
 
 let currentActivity = null;
-let browser = null;
 let page = null;
 
-async function setupBrowser() {
-    console.log('Setting up browser...');
-    browser = await puppeteer.launch({ 
-        headless: false, // Make browser visible
-        args: ['--no-sandbox', '--disable-web-security'],
-        defaultViewport: null
-    });
-    page = await browser.newPage();
-    console.log('Navigating to YouTube Music...');
-    await page.goto('https://music.youtube.com', { waitUntil: 'networkidle0', timeout: 60000 });
-    
-    // Wait for user to log in if needed
+async function findYouTubeMusicTab() {
     try {
-        await page.waitForSelector('.title.style-scope.ytmusic-player-bar', { timeout: 30000 });
-        console.log('Music player detected!');
+        // Try different debugging ports (Thorium might use a different port)
+        const ports = [9222, 9223, 9224, 9225];
+        
+        for (const port of ports) {
+            try {
+                const browser = await puppeteer.connect({
+                    browserURL: `http://127.0.0.1:${port}`,
+                });
+
+                const pages = await browser.pages();
+                for (const p of pages) {
+                    const url = await p.url();
+                    const title = await p.title();
+                    // Check both URL and page title to catch the YouTube Music app
+                    if (url.includes('music.youtube.com') || 
+                        title.includes('YouTube Music') || 
+                        url.includes('youtube.com/watch')) {
+                        console.log('Found YouTube Music!');
+                        return p;
+                    }
+                }
+            } catch (e) {
+                continue; // Try next port
+            }
+        }
+        return null;
     } catch (error) {
-        console.log('Please log in to YouTube Music in the browser window and start playing a song');
-        // Keep waiting for the player to appear
-        await page.waitForSelector('.title.style-scope.ytmusic-player-bar', { timeout: 0 });
-        console.log('Music player detected after login!');
+        console.error('Error connecting to browser:', error);
+        console.log('Please make sure YouTube Music is open in your browser');
+        return null;
     }
-    console.log('Browser setup complete');
+}
+
+async function setupConnection() {
+    console.log('Looking for YouTube Music tab...');
+    page = await findYouTubeMusicTab();
+    
+    if (!page) {
+        console.log('Could not find YouTube Music tab. Please make sure YouTube Music is open.');
+        process.exit(1);
+    }
+    
+    console.log('Successfully connected to YouTube Music!');
 }
 
 async function getCurrentSong() {
     if (!page) {
-        console.log('Page not initialized');
         return null;
     }
     
     try {
         const songInfo = await page.evaluate(() => {
             const title = document.querySelector('.title.style-scope.ytmusic-player-bar')?.textContent?.trim();
-            const artist = document.querySelector('.byline.style-scope.ytmusic-player-bar')?.textContent?.trim();
+            const artist = document.querySelector('.byline.style-scope.ytmusic-player-bar a')?.textContent?.trim();
             
-            // Get high quality album art
-            const thumbnail = document.querySelector('.image.style-scope.ytmusic-player-bar')?.src?.replace('w60-h60', 'w500-h500');
+            // Enhanced album art detection with fallbacks
+            const thumbnailSelectors = [
+                '#song-image .thumbnail.style-scope.ytmusic-player img',
+                '#song-image img',
+                '.image.style-scope.ytmusic-player-bar',
+                'img.style-scope.ytmusic-player-bar',
+                '.thumbnail.style-scope.ytmusic-player'
+            ];
             
-            // Check if music is paused
-            const isPaused = document.querySelector('button.play-pause-button')?.getAttribute('title')?.includes('Play');
+            let thumbnail = null;
+            for (const selector of thumbnailSelectors) {
+                const img = document.querySelector(selector);
+                if (img?.src) {
+                    thumbnail = img.src.replace(/=w\d+-h\d+/, '=w500-h500');
+                    if (thumbnail && !thumbnail.startsWith('data:')) break;
+                }
+            }
             
-            // Get detailed time information
+            const isPaused = document.querySelector('button[aria-label="Play"], .play-pause-button[title*="Play"]') !== null;
+            
             const timeInfo = document.querySelector('.time-info')?.textContent?.trim() || '';
-            const [currentTime, duration] = timeInfo.split(' / ');
+            const [currentTime = '0:00', duration = '0:00'] = timeInfo.split(' / ');
             
             const getCurrentTimestamp = (timeStr) => {
                 if (!timeStr) return 0;
@@ -62,23 +96,18 @@ async function getCurrentSong() {
             const currentSeconds = getCurrentTimestamp(currentTime);
             const totalSeconds = getCurrentTimestamp(duration);
             
-            // Get album name if available
-            const album = document.querySelector('.subtitle.style-scope.ytmusic-player-bar yt-formatted-string:nth-child(3)')?.textContent?.trim();
-            
             return {
                 title,
                 artist,
-                thumbnail,
+                thumbnail: thumbnail || 'default',
                 isPaused,
                 currentSeconds,
                 totalSeconds,
-                album,
                 currentTime,
                 duration
             };
         });
 
-        console.log('Current song info:', songInfo);
         return songInfo;
     } catch (error) {
         console.error('Error getting song info:', error);
@@ -90,19 +119,18 @@ async function updateActivity() {
     try {
         const songInfo = await getCurrentSong();
         if (!songInfo) {
-            console.log('No song info available');
             return;
         }
 
         const now = Math.floor(Date.now() / 1000);
         const activity = {
             details: songInfo.title || 'Unknown Track',
-            state: `by ${songInfo.artist}${songInfo.album ? ` • ${songInfo.album}` : ''}`,
+            state: songInfo.isPaused ? 'Music Paused' : `by ${songInfo.artist || 'Unknown Artist'}`,
             largeImageKey: songInfo.thumbnail || 'youtube_music',
             largeImageText: `${songInfo.title} - ${songInfo.artist}`,
             smallImageKey: songInfo.isPaused ? 'pause' : 'play',
-            smallImageText: `${songInfo.currentTime} / ${songInfo.duration}`,
-            instance: false,
+            smallImageText: songInfo.isPaused ? 'Paused' : `${songInfo.currentTime} / ${songInfo.duration}`,
+            instance: false
         };
 
         if (!songInfo.isPaused && songInfo.totalSeconds > 0) {
@@ -110,42 +138,27 @@ async function updateActivity() {
             activity.endTimestamp = now + (songInfo.totalSeconds - songInfo.currentSeconds);
         }
 
-        console.log('Setting activity:', activity);
-        await rpc.setActivity(activity);
-        console.log('Activity set successfully');
-        currentActivity = activity;
+        if (JSON.stringify(activity) !== JSON.stringify(currentActivity)) {
+            console.log('Updating activity:', activity);
+            await rpc.setActivity(activity);
+            currentActivity = activity;
+        }
     } catch (error) {
         console.error('Error updating activity:', error);
     }
 }
 
-// Handle Discord RPC events
 rpc.on('ready', async () => {
-    console.log('Discord RPC Connected! User:', rpc.user.username);
-    await setupBrowser();
-    setInterval(updateActivity, 5000);
+    await setupConnection();
     updateActivity();
+    setInterval(updateActivity, 1000);
 });
 
-rpc.on('connected', () => {
-    console.log('Connected to Discord!');
-});
-
-rpc.on('disconnected', () => {
-    console.log('Disconnected from Discord!');
-});
-
-process.on('unhandledRejection', error => {
-    console.error('Unhandled promise rejection:', error);
-});
-
-process.on('SIGINT', async () => {
-    console.log('Shutting down...');
-    if (browser) await browser.close();
+process.on('unhandledRejection', console.error);
+process.on('SIGINT', () => {
     rpc.destroy();
     process.exit();
 });
 
-// Connect to Discord
 console.log('Connecting to Discord...');
 rpc.login({ clientId }).catch(console.error);

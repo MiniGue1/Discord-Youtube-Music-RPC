@@ -1,0 +1,1 @@
+start "" "%LOCALAPPDATA%\Thorium\Application\thorium.exe" --remote-debugging-port=9223
